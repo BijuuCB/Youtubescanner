@@ -1,0 +1,53 @@
+plugins {
+    id 'com.android.application'
+}
+
+def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInteger()
+
+android {
+    namespace 'de.paul.youtubescanner'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'de.paul.youtubescanner'
+        minSdk 26
+        targetSdk 34
+        versionCode runNumber
+        versionName "1.0." + runNumber
+    }
+
+    // Optional: fester Schlüssel aus GitHub-Secrets, damit Updates über die alte
+    // Version installiert werden können, ohne dass Daten verloren gehen.
+    // Ohne Secrets wird mit dem Standard-Debug-Schlüssel signiert.
+    def keystorePath = System.getenv("SIGNING_KEYSTORE_PATH")
+    def keystorePass = System.getenv("SIGNING_PASSWORD")
+    def hasFixedKey = keystorePath && keystorePass && file(keystorePath).exists()
+
+    signingConfigs {
+        if (hasFixedKey) {
+            fixed {
+                storeFile file(keystorePath)
+                storePassword keystorePass
+                keyAlias 'scanner'
+                keyPassword keystorePass
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig hasFixedKey ? signingConfigs.fixed : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        checkReleaseBuilds false
+        abortOnError false
+    }
+}
