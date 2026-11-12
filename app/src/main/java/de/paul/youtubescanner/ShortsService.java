@@ -51,7 +51,12 @@ public class ShortsService extends AccessibilityService {
     private long lastPersist = 0;
     private long lastSwipe = 0;
     private long lastDiag = 0;
-    private int swipes = 0;
+    private int swipes = 0;          // Rückfall: Scroll-Signale des Shorts-Feeds
+    private int fpVideos = 0;        // Hauptweg: Zahl verschiedener Shorts (über Kanal/Titel erkannt)
+    private String fpCurrent = "";
+    private String fpCandidate = "";
+    private long fpCandidateSince = 0;
+    private static final long FP_STABLE_MS = 800;
 
     private SharedPreferences prefs;
     private BroadcastReceiver screenOffReceiver;
@@ -129,6 +134,7 @@ public class ShortsService extends AccessibilityService {
         if (inShorts) {
             if (sessionStart == 0) startSession(now);
             lastSeen = now;
+            trackVideoChange(root, now);
         } else if (sessionStart > 0) {
             endSession(now);
         }
@@ -137,6 +143,96 @@ public class ShortsService extends AccessibilityService {
             lastDiag = now;
             writeDiagnostics(root, inShorts, now);
         }
+    }
+
+    /**
+     * Erkennt ein neues Short daran, dass sich Kanalname/Titel des gerade
+     * angezeigten Shorts ändern. Gezählt wird erst, wenn das neue Short
+     * mindestens 0,8 s stabil zu sehen ist – halbe Wischer zählen nicht.
+     * Die Texte selbst werden nicht gespeichert, nur verglichen.
+     */
+    private void trackVideoChange(AccessibilityNodeInfo root, long now) {
+        String fp = fingerprint(root);
+        if (fp.isEmpty()) return;
+        if (fp.equals(fpCurrent)) {
+            fpCandidate = "";
+            return;
+        }
+        if (!fp.equals(fpCandidate)) {
+            fpCandidate = fp;
+            fpCandidateSince = now;
+            if (fpCurrent.isEmpty()) { // allererstes Short der Session sofort zählen
+                fpCurrent = fp;
+                fpVideos = 1;
+                fpCandidate = "";
+            }
+            return;
+        }
+        if (now - fpCandidateSince >= FP_STABLE_MS) {
+            fpCurrent = fp;
+            fpVideos++;
+            fpCandidate = "";
+        }
+    }
+
+    private static final java.util.regex.Pattern COUNTER =
+            java.util.regex.Pattern.compile("(?s).*\\d.*");
+
+    /** Texte des Shorts, das gerade (fast) den ganzen Bildschirm füllt. */
+    private String fingerprint(AccessibilityNodeInfo root) {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        AccessibilityNodeInfo page = null;
+        long best = 0;
+        Rect r = new Rect();
+        for (String id : new String[]{"reel_player_page_container", "reel_watch_player"}) {
+            List<AccessibilityNodeInfo> found = root.findAccessibilityNodeInfosByViewId(YT + ":id/" + id);
+            if (found == null) continue;
+            for (AccessibilityNodeInfo n : found) {
+                if (n == null || !n.isVisibleToUser()) continue;
+                n.getBoundsInScreen(r);
+                int top = Math.max(r.top, 0), bottom = Math.min(r.bottom, dm.heightPixels);
+                long visible = (long) Math.max(0, bottom - top) * r.width();
+                if (visible > best) { best = visible; page = n; }
+            }
+            if (page != null) break;
+        }
+        if (page == null) page = root;
+
+        TreeSet<String> texts = new TreeSet<>();
+        ArrayDeque<AccessibilityNodeInfo> q = new ArrayDeque<>();
+        q.add(page);
+        int visited = 0;
+        while (!q.isEmpty() && visited < 400) {
+            AccessibilityNodeInfo n = q.poll();
+            visited++;
+            if (n == null) continue;
+            if (n.isVisibleToUser()) {
+                // Nur sichtbarer Text (Kanal, Titel), keine Button-Beschreibungen wie
+                // "Pausieren", die sich beim Antippen ändern.
+                CharSequence cs = n.getText();
+                if (cs != null) {
+                    String t = cs.toString().trim();
+                    // Alles mit Ziffern (Likes, Kommentare, Abspielzeit) ändert sich – nicht verwenden.
+                    if (t.length() >= 4 && !COUNTER.matcher(t).matches()) {
+                        texts.add(t.length() > 80 ? t.substring(0, 80) : t);
+                    }
+                }
+            }
+            for (int i = 0; i < n.getChildCount(); i++) {
+                AccessibilityNodeInfo c = n.getChild(i);
+                if (c != null) q.add(c);
+            }
+        }
+        lastFpTextCount = texts.size();
+        if (texts.isEmpty()) return "";
+        return Integer.toHexString(texts.toString().hashCode());
+    }
+
+    private int lastFpTextCount = 0;
+
+    /** Beste Schätzung der Shorts in der laufenden Session. */
+    private int videoCount() {
+        return fpVideos > 0 ? fpVideos : swipes + 1;
     }
 
     private boolean isFromShortsFeed(AccessibilityEvent e) {
@@ -201,13 +297,13 @@ public class ShortsService extends AccessibilityService {
             }
         }
 
-        String line = diagFmt.format(new Date(now)) + " " + (inShorts ? "[SHORTS]" : "[-]")
+        String line = diagFmt.format(new Date(now)) + " " + (inShorts ? "[SHORTS videos=" + fpVideos + " scroll=" + swipes + " texte=" + lastFpTextCount + "]" : "[-]")
                 + " groß=" + big + " stichwort=" + keywords;
         SharedPreferences d = getSharedPreferences("diag", MODE_PRIVATE);
         String old = d.getString("log", "");
         // Gleiche Zeile wie zuletzt nicht doppelt speichern
         String lastBody = d.getString("lastBody", "");
-        String body = (inShorts ? "S" : "-") + big + keywords;
+        String body = (inShorts ? "S" + fpVideos + "/" + swipes : "-") + big + keywords;
         if (body.equals(lastBody)) return;
         String[] lines = old.isEmpty() ? new String[0] : old.split("\n");
         StringBuilder sb = new StringBuilder(line);
@@ -219,6 +315,9 @@ public class ShortsService extends AccessibilityService {
         sessionStart = now;
         lastSeen = now;
         swipes = 0;
+        fpVideos = 0;
+        fpCurrent = "";
+        fpCandidate = "";
         lastSwipe = now;
         persistPending();
     }
@@ -226,10 +325,12 @@ public class ShortsService extends AccessibilityService {
     private void endSession(long now) {
         if (sessionStart == 0) return;
         if (now - sessionStart >= MIN_SESSION_MS) {
-            ShortsDb.get(this).insert(sessionStart, now, swipes + 1);
+            ShortsDb.get(this).insert(sessionStart, now, videoCount());
         }
         sessionStart = 0;
         swipes = 0;
+        fpVideos = 0;
+        fpCurrent = "";
         clearPending();
     }
 
@@ -239,21 +340,21 @@ public class ShortsService extends AccessibilityService {
         prefs.edit()
                 .putLong("start", sessionStart)
                 .putLong("lastSeen", lastSeen)
-                .putInt("swipes", swipes)
+                .putInt("videos", videoCount())
                 .apply();
     }
 
     private void clearPending() {
-        if (prefs != null) prefs.edit().remove("start").remove("lastSeen").remove("swipes").apply();
+        if (prefs != null) prefs.edit().remove("start").remove("lastSeen").remove("videos").apply();
     }
 
     /** Falls Android den Dienst mitten in einer Session beendet hat, die Session bis zum letzten Lebenszeichen retten. */
     private void recoverPendingSession() {
         long start = prefs.getLong("start", 0);
         long seen = prefs.getLong("lastSeen", 0);
-        int sw = prefs.getInt("swipes", 0);
+        int videos = prefs.getInt("videos", 1);
         if (start > 0 && seen - start >= MIN_SESSION_MS) {
-            ShortsDb.get(this).insert(start, seen, sw + 1);
+            ShortsDb.get(this).insert(start, seen, Math.max(1, videos));
         }
         clearPending();
     }
