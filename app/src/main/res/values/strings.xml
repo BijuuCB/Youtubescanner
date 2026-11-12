@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">YouTube Scanner</string>
-    <string name="a11y_label">YouTube Scanner – Shorts-Erkennung</string>
-    <string name="a11y_desc">Erkennt, wann du in der YouTube-App Shorts schaust, und speichert Start- und Endzeit nur lokal auf diesem Handy. Es werden keine Inhalte gelesen oder verschickt.</string>
+    <string name="a11y_label">YouTube Scanner – Shorts &amp; Inhalte</string>
+    <string name="a11y_desc">Erkennt, wann du YouTube-Shorts schaust, und liest in den Apps mit, die du in YouTube Scanner freigibst (Claude, Chrome, YouTube, Notion): was du tippst, suchst und öffnest. Passwortfelder und lange Zahlenfolgen werden nie gespeichert. Alles bleibt nur auf diesem Handy und wird nach 30 Tagen gelöscht.</string>
 </resources>

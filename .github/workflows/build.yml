@@ -23,18 +23,30 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Signierschlüssel aus Secrets holen (falls vorhanden)
-        env:
-          KEYSTORE_B64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+      # Fester Signierschlüssel, damit Updates einfach über die alte Version
+      # installiert werden können (Daten und Freigaben bleiben erhalten).
+      # Er wird einmal erzeugt und im privaten Actions-Cache dieses Repos gehalten.
+      - name: Signierschlüssel aus dem Cache holen
+        uses: actions/cache@v4
+        with:
+          path: ~/.scanner-signing
+          key: scanner-signing-v1
+
+      - name: Signierschlüssel erzeugen (nur beim ersten Mal)
         run: |
-          if [ -n "$KEYSTORE_B64" ]; then
-            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/scanner.keystore"
-            echo "SIGNING_KEYSTORE_PATH=$RUNNER_TEMP/scanner.keystore" >> "$GITHUB_ENV"
+          mkdir -p ~/.scanner-signing
+          if [ ! -f ~/.scanner-signing/scanner.keystore ]; then
+            head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' > ~/.scanner-signing/pass
+            keytool -genkeypair -keystore ~/.scanner-signing/scanner.keystore -alias scanner \
+              -keyalg RSA -keysize 2048 -validity 20000 \
+              -storepass "$(cat ~/.scanner-signing/pass)" -keypass "$(cat ~/.scanner-signing/pass)" \
+              -dname "CN=YouTube Scanner, C=DE"
           fi
+          echo "SIGNING_KEYSTORE_PATH=$HOME/.scanner-signing/scanner.keystore" >> "$GITHUB_ENV"
+          echo "::add-mask::$(cat ~/.scanner-signing/pass)"
+          echo "SIGNING_PASSWORD=$(cat ~/.scanner-signing/pass)" >> "$GITHUB_ENV"
 
       - name: APK bauen
-        env:
-          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: APK umbenennen

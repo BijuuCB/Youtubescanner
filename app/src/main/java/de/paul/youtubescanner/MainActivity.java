@@ -118,9 +118,153 @@ public class MainActivity extends Activity {
 
         renderSummary(apps, shorts, dayStart, dayEnd);
         renderTopApps(apps);
+        renderShare(apps, shorts, dayStart, dayEnd);
+        renderContent(dayStart, dayEnd);
         renderTimeline(apps, shorts, dayStart, dayEnd);
+        renderContentSettings();
         renderXiaomiHint();
         renderTools();
+    }
+
+    // ------------------------------------------------- Inhalte & Teilen
+
+    private static String appName(String pkg) {
+        for (String[] a : ContentWatcher.APPS) if (a[0].equals(pkg)) return a[1].split(" ")[0];
+        return pkg;
+    }
+
+    private void renderShare(List<UsageReader.AppSession> apps, List<ShortsDb.Session> shorts, long dayStart, long dayEnd) {
+        Button share = bigButton("Tag an Claude teilen – Zusammenfassung holen");
+        share.setOnClickListener(v -> shareDay(apps, shorts, dayStart, dayEnd));
+        content.addView(share);
+        space(12);
+    }
+
+    private void shareDay(List<UsageReader.AppSession> apps, List<ShortsDb.Session> shorts, long dayStart, long dayEnd) {
+        SimpleDateFormat dateFmt = new SimpleDateFormat("EEEE, d. MMMM yyyy", Locale.GERMANY);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Hier ist mein Handy-Protokoll vom ").append(dateFmt.format(dayStart)).append(".\n")
+                .append("Bitte fass meinen Tag kurz zusammen: Welche Themen haben mich beschäftigt? ")
+                .append("Wie viel davon war echtes Lernen bzw. sinnvolle Arbeit und wie viel Ablenkung? ")
+                .append("Was habe ich gegoogelt und worüber habe ich mich informiert? ")
+                .append("Und wie lange und wann habe ich Shorts geschaut?\n\n");
+
+        // Bildschirmzeit pro App
+        Map<String, Long> totals = new HashMap<>();
+        Map<String, String> labels = new HashMap<>();
+        long screen = 0;
+        for (UsageReader.AppSession s : apps) {
+            totals.merge(s.pkg, s.duration(), Long::sum);
+            labels.put(s.pkg, s.label);
+            screen += s.duration();
+        }
+        List<Map.Entry<String, Long>> list = new ArrayList<>(totals.entrySet());
+        Collections.sort(list, (a, b) -> Long.compare(b.getValue(), a.getValue()));
+        sb.append("== Bildschirmzeit gesamt: ").append(dur(screen)).append(" ==\n");
+        for (int i = 0; i < Math.min(12, list.size()); i++) {
+            sb.append("- ").append(labels.get(list.get(i).getKey())).append(": ").append(dur(list.get(i).getValue())).append('\n');
+        }
+
+        sb.append("\n== Shorts ==\n");
+        if (shorts.isEmpty()) sb.append("keine\n");
+        for (ShortsDb.Session s : shorts) {
+            sb.append(timeFmt.format(s.start)).append("–").append(timeFmt.format(s.end)).append("  ")
+                    .append(dur(s.end - s.start)).append(", ").append(s.swipes).append(" Shorts\n");
+        }
+
+        sb.append("\n== Zeitleiste ==\n");
+        for (UsageReader.AppSession s : apps) {
+            if (s.duration() < 30_000) continue;
+            sb.append(timeFmt.format(s.start)).append("–").append(timeFmt.format(s.end)).append("  ")
+                    .append(s.label).append(" (").append(dur(s.duration())).append(")\n");
+        }
+
+        sb.append("\n== Inhalte (was ich getippt, gesucht, geöffnet habe) ==\n");
+        List<ContentDb.Entry> entries = ContentDb.get(this).between(dayStart, dayEnd);
+        if (entries.isEmpty()) sb.append("keine\n");
+        for (ContentDb.Entry e : entries) {
+            sb.append(timeFmt.format(e.ts)).append(" [").append(appName(e.pkg)).append(" · ").append(e.kind).append("] ")
+                    .append(e.text).append('\n');
+        }
+
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_SUBJECT, "Handy-Protokoll " + dateFmt.format(dayStart));
+        send.putExtra(Intent.EXTRA_TEXT, sb.toString());
+        startActivity(Intent.createChooser(send, "Protokoll teilen"));
+    }
+
+    private void renderContent(long dayStart, long dayEnd) {
+        List<ContentDb.Entry> entries = ContentDb.get(this).between(dayStart, dayEnd);
+        LinearLayout card = card();
+        card.addView(text("Was du gemacht hast", 17, TEXT, true));
+        if (entries.isEmpty()) {
+            card.addView(text("Noch nichts mitgelesen. Tippe z. B. etwas in Claude oder suche bei Google.", 14, MUTED, false));
+        }
+        int shown = 0;
+        for (int i = entries.size() - 1; i >= 0 && shown < 40; i--, shown++) {
+            ContentDb.Entry e = entries.get(i);
+            LinearLayout r = new LinearLayout(this);
+            r.setOrientation(LinearLayout.VERTICAL);
+            r.setPadding(0, dp(7), 0, dp(7));
+            TextView meta = text(timeFmt.format(e.ts) + " · " + appName(e.pkg) + " · " + e.kind, 12, MUTED, false);
+            TextView body = text(e.text, 14, TEXT, false);
+            body.setMaxLines(3);
+            body.setEllipsize(TextUtils.TruncateAt.END);
+            r.addView(meta);
+            r.addView(body);
+            card.addView(r);
+        }
+        if (entries.size() > 40) card.addView(text("… und " + (entries.size() - 40) + " ältere Einträge (im Teilen enthalten)", 12, MUTED, false));
+        content.addView(card);
+        space(12);
+    }
+
+    private void renderContentSettings() {
+        space(12);
+        android.content.SharedPreferences p = getSharedPreferences("content_settings", MODE_PRIVATE);
+        LinearLayout card = card();
+        card.addView(text("Inhalte mitlesen", 17, TEXT, true));
+        card.addView(text("Nur in diesen Apps. Passwortfelder und lange Zahlenfolgen werden nie gespeichert. "
+                + "Alles bleibt auf dem Handy und wird nach 30 Tagen gelöscht.", 13, MUTED, false));
+
+        android.widget.Switch master = new android.widget.Switch(this);
+        master.setText("Mitlesen eingeschaltet");
+        master.setTextSize(15);
+        master.setTextColor(TEXT);
+        master.setChecked(p.getBoolean("on", true));
+        master.setPadding(0, dp(10), 0, dp(6));
+        master.setOnCheckedChangeListener((b, on) -> p.edit().putBoolean("on", on).apply());
+        card.addView(master);
+
+        for (String[] a : ContentWatcher.APPS) {
+            android.widget.Switch sw = new android.widget.Switch(this);
+            sw.setText(a[1] + "\n" + a[2]);
+            sw.setTextSize(14);
+            sw.setTextColor(TEXT);
+            sw.setPadding(dp(8), dp(6), 0, dp(6));
+            sw.setChecked(p.getBoolean("app_" + a[0], true));
+            sw.setOnCheckedChangeListener((b, on) -> p.edit().putBoolean("app_" + a[0], on).apply());
+            card.addView(sw);
+        }
+
+        Button wipe = bigButton("Alle mitgelesenen Inhalte löschen");
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(Color.parseColor("#B23A30"));
+        d.setCornerRadius(dp(10));
+        wipe.setBackground(d);
+        wipe.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
+                .setTitle("Inhalte löschen?")
+                .setMessage("Alle mitgelesenen Texte, Suchen und Seiten werden entfernt.")
+                .setPositiveButton("Löschen", (dlg, w) -> {
+                    ContentDb.get(this).deleteAll();
+                    render();
+                })
+                .setNegativeButton("Abbrechen", null)
+                .show());
+        card.addView(wipe);
+        content.addView(card);
+        space(12);
     }
 
     private void renderTools() {

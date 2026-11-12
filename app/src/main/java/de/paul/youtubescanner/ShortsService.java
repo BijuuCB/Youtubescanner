@@ -55,6 +55,7 @@ public class ShortsService extends AccessibilityService {
 
     private SharedPreferences prefs;
     private BroadcastReceiver screenOffReceiver;
+    private ContentWatcher content;
     private final SimpleDateFormat diagFmt = new SimpleDateFormat("dd.MM. HH:mm:ss", Locale.GERMANY);
 
     @Override
@@ -62,11 +63,17 @@ public class ShortsService extends AccessibilityService {
         super.onServiceConnected();
         prefs = getSharedPreferences("pending", MODE_PRIVATE);
         recoverPendingSession();
+        content = new ContentWatcher(this);
+        try {
+            ContentDb.get(this).purgeOld();
+        } catch (Exception ignored) {
+        }
 
         screenOffReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
                 endSession(System.currentTimeMillis());
+                if (content != null) content.commitAll(null);
             }
         };
         registerReceiver(screenOffReceiver, new IntentFilter(Intent.ACTION_SCREEN_OFF));
@@ -79,6 +86,12 @@ public class ShortsService extends AccessibilityService {
         String pkg = pkgCs.toString();
         long now = System.currentTimeMillis();
         int type = e.getEventType();
+
+        try {
+            if (content != null) content.onEvent(e, pkg, this::getRootInActiveWindow);
+        } catch (Exception ignored) {
+            // Mitlesen darf die Shorts-Erkennung nie stören.
+        }
 
         if (!YT.equals(pkg)) {
             // Eine andere App (oder der Startbildschirm) ist in den Vordergrund gekommen.
@@ -253,6 +266,7 @@ public class ShortsService extends AccessibilityService {
     @Override
     public void onDestroy() {
         endSession(System.currentTimeMillis());
+        if (content != null) content.commitAll(null);
         if (screenOffReceiver != null) {
             try {
                 unregisterReceiver(screenOffReceiver);
