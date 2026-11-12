@@ -54,6 +54,10 @@ public class ShortsDb extends SQLiteOpenHelper {
         getWritableDatabase().insert("sessions", null, v);
     }
 
+    public void deleteAll() {
+        getWritableDatabase().delete("sessions", null, null);
+    }
+
     /** Alle Sessions, die den Zeitraum [from, to) berühren. */
     public List<Session> between(long from, long to) {
         List<Session> out = new ArrayList<>();

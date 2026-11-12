@@ -120,6 +120,65 @@ public class MainActivity extends Activity {
         renderTopApps(apps);
         renderTimeline(apps, shorts, dayStart, dayEnd);
         renderXiaomiHint();
+        renderTools();
+    }
+
+    private void renderTools() {
+        space(12);
+        LinearLayout card = card();
+        card.addView(text("Shorts-Erkennung prüfen", 17, TEXT, true));
+        card.addView(text("Das Protokoll enthält nur die Namen der Bildschirm-Elemente in YouTube "
+                + "(z. B. „reel_recycler“), keinen Text und keine Videotitel. "
+                + "Kopieren und an Claude schicken, wenn die Erkennung danebenliegt.", 13, MUTED, false));
+
+        Button copy = bigButton("Diagnose kopieren");
+        copy.setOnClickListener(v -> {
+            String log = getSharedPreferences("diag", MODE_PRIVATE).getString("log", "");
+            if (log.isEmpty()) {
+                android.widget.Toast.makeText(this, "Noch leer – öffne kurz YouTube und Shorts.", android.widget.Toast.LENGTH_LONG).show();
+                return;
+            }
+            String header = "YouTube Scanner " + versionName() + " · YouTube " + ytVersion() + "\n";
+            android.content.ClipboardManager cm = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(android.content.ClipData.newPlainText("Diagnose", header + log));
+            android.widget.Toast.makeText(this, "Kopiert", android.widget.Toast.LENGTH_SHORT).show();
+        });
+        card.addView(copy);
+
+        Button wipe = bigButton("Alle Shorts-Daten löschen");
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(Color.parseColor("#B23A30"));
+        d.setCornerRadius(dp(10));
+        wipe.setBackground(d);
+        wipe.setOnClickListener(v -> new android.app.AlertDialog.Builder(this)
+                .setTitle("Shorts-Daten löschen?")
+                .setMessage("Alle bisher erkannten Shorts-Sessions werden entfernt. Die App-Zeitleiste bleibt.")
+                .setPositiveButton("Löschen", (dlg, w) -> {
+                    ShortsDb.get(this).deleteAll();
+                    getSharedPreferences("diag", MODE_PRIVATE).edit().clear().apply();
+                    render();
+                })
+                .setNegativeButton("Abbrechen", null)
+                .show());
+        card.addView(wipe);
+        card.addView(text("Version " + versionName(), 12, MUTED, false));
+        content.addView(card);
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
+    }
+
+    private String ytVersion() {
+        try {
+            return getPackageManager().getPackageInfo(ShortsService.YT, 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     private void renderSetup(boolean usageOk, boolean a11yOk) {
@@ -157,7 +216,7 @@ public class MainActivity extends Activity {
 
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        row.addView(stat("Shorts", dur(shortsMs), shorts.size() + " Sessions · ~" + swipes + " Videos", SHORTS),
+        row.addView(stat("Shorts", dur(shortsMs), shorts.size() + " Sessions · " + swipes + " Shorts", SHORTS),
                 new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         View gap = new View(this);
         row.addView(gap, new LinearLayout.LayoutParams(dp(10), 1));
@@ -228,7 +287,7 @@ public class MainActivity extends Activity {
                 for (ShortsDb.Session sh : shorts) {
                     if (sh.end > s.start - 5000 && sh.start < s.end + 5000) {
                         card.addView(row(timeFmt.format(sh.start) + "–" + timeFmt.format(sh.end),
-                                "▶ Shorts · ~" + sh.swipes + " Videos", dur(sh.end - sh.start), SHORTS, true));
+                                "▶ Shorts · " + sh.swipes + " Videos", dur(sh.end - sh.start), SHORTS, true));
                         usedShorts.add(sh);
                     }
                 }
@@ -238,7 +297,7 @@ public class MainActivity extends Activity {
         for (ShortsDb.Session sh : shorts) {
             if (usedShorts.contains(sh)) continue;
             card.addView(row(timeFmt.format(sh.start) + "–" + timeFmt.format(sh.end),
-                    "▶ Shorts · ~" + sh.swipes + " Videos", dur(clip(sh.start, sh.end, dayStart, dayEnd)), SHORTS, false));
+                    "▶ Shorts · " + sh.swipes + " Videos", dur(clip(sh.start, sh.end, dayStart, dayEnd)), SHORTS, false));
         }
         content.addView(card);
         space(12);
