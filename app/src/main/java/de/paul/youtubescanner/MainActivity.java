@@ -61,12 +61,26 @@ public class MainActivity extends Activity {
         content.setPadding(p, p, p, dp(40));
         scroll.addView(content);
         setContentView(scroll);
+
+        // Für die Warnung "Scanner läuft nicht" (Android 13+ fragt einmal nach).
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
         render();
+        // Zeitleiste der letzten Tage im Hintergrund sichern und Wächter planen.
+        new Thread(() -> {
+            try {
+                UsageArchive.get(this).syncRecent();
+            } catch (Exception ignored) {
+            }
+        }).start();
+        WatchdogJob.schedule(this);
     }
 
     // ------------------------------------------------------------------ UI
@@ -110,10 +124,9 @@ public class MainActivity extends Activity {
         boolean usageOk = hasUsageAccess();
         boolean a11yOk = isAccessibilityEnabled();
         if (!usageOk || !a11yOk) renderSetup(usageOk, a11yOk);
+        else renderStatus();
 
-        List<UsageReader.AppSession> apps = usageOk
-                ? new UsageReader(this).sessions(dayStart, dayEnd)
-                : new ArrayList<>();
+        List<UsageReader.AppSession> apps = UsageArchive.get(this).sessionsForDay(dayStart, dayEnd);
         List<ShortsDb.Session> shorts = ShortsDb.get(this).between(dayStart, dayEnd);
 
         renderSummary(apps, shorts, dayStart, dayEnd);
@@ -133,11 +146,177 @@ public class MainActivity extends Activity {
         return pkg;
     }
 
+    private void renderStatus() {
+        boolean running = ShortsService.running;
+        TextView t = text(running
+                ? "● Erkennung läuft"
+                : "● Erkennung startet … falls das so bleibt: Bedienungshilfe kurz aus- und wieder einschalten", 13,
+                running ? ACCENT : SHORTS, true);
+        t.setGravity(Gravity.CENTER);
+        if (!running) t.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+        content.addView(t);
+        space(10);
+    }
+
     private void renderShare(List<UsageReader.AppSession> apps, List<ShortsDb.Session> shorts, long dayStart, long dayEnd) {
-        Button share = bigButton("Tag an Claude teilen – Zusammenfassung holen");
+        Button week = bigButton("Letzte 7 Tage an Claude teilen");
+        week.setOnClickListener(v -> shareWeek());
+        content.addView(week);
+        Button share = bigButton("Nur diesen Tag teilen");
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(Color.parseColor("#5E8A7D"));
+        d.setCornerRadius(dp(10));
+        share.setBackground(d);
         share.setOnClickListener(v -> shareDay(apps, shorts, dayStart, dayEnd));
         content.addView(share);
         space(12);
+    }
+
+    /** Baut das Protokoll der letzten 7 Tage (inkl. heute) und teilt es als Textdatei. */
+    private void shareWeek() {
+        android.widget.Toast.makeText(this, "Protokoll wird erstellt …", android.widget.Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            String text;
+            try {
+                UsageArchive.get(this).syncRecent();
+                text = buildWeekText();
+            } catch (Exception e) {
+                runOnUiThread(() -> android.widget.Toast.makeText(this, "Fehler: " + e.getMessage(), android.widget.Toast.LENGTH_LONG).show());
+                return;
+            }
+            final String body = text;
+            runOnUiThread(() -> sendAsFile(body));
+        }).start();
+    }
+
+    private String buildWeekText() {
+        SimpleDateFormat dateFmt = new SimpleDateFormat("EEEE, d. MMMM yyyy", Locale.GERMANY);
+        SimpleDateFormat shortDate = new SimpleDateFormat("EE d.M.", Locale.GERMANY);
+        long from = UsageArchive.dayStart(-6);
+        long to = UsageArchive.dayStart(1);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("HANDY-PROTOKOLL DER LETZTEN 7 TAGE\n")
+                .append(dateFmt.format(from)).append(" bis ").append(dateFmt.format(to - 1)).append("\n\n")
+                .append("Aufbau: zuerst eine Übersicht pro Tag, danach für jeden Tag die Shorts, ")
+                .append("die App-Zeitleiste (ab 1 Minute) und alle mitgelesenen Inhalte ")
+                .append("(Fragen an Claude, Google-Suchen, besuchte Seiten, YouTube-Videos, Notion).\n\n");
+
+        // Übersicht
+        sb.append("== ÜBERSICHT ==\n");
+        long weekScreen = 0, weekShorts = 0;
+        int weekShortCount = 0;
+        Map<String, Long> weekApps = new HashMap<>();
+        Map<String, String> labels = new HashMap<>();
+        for (int off = -6; off <= 0; off++) {
+            long ds = UsageArchive.dayStart(off), de = UsageArchive.dayStart(off + 1);
+            List<UsageReader.AppSession> apps = UsageArchive.get(this).read(ds, de);
+            long screen = 0;
+            for (UsageReader.AppSession a : apps) {
+                screen += a.duration();
+                weekApps.merge(a.pkg, a.duration(), Long::sum);
+                labels.put(a.pkg, a.label);
+            }
+            long sm = 0;
+            int sc = 0;
+            for (ShortsDb.Session s : ShortsDb.get(this).between(ds, de)) {
+                sm += clip(s.start, s.end, ds, de);
+                sc += s.swipes;
+            }
+            int contentCount = ContentDb.get(this).between(ds, de).size();
+            weekScreen += screen;
+            weekShorts += sm;
+            weekShortCount += sc;
+            sb.append(shortDate.format(ds)).append(": Bildschirm ").append(apps.isEmpty() ? "keine Daten" : dur(screen))
+                    .append(" · Shorts ").append(dur(sm)).append(" (").append(sc).append(")")
+                    .append(" · ").append(contentCount).append(" Inhalte\n");
+        }
+        sb.append("Woche gesamt: Bildschirm ").append(dur(weekScreen)).append(" · Shorts ").append(dur(weekShorts))
+                .append(" (").append(weekShortCount).append(" Shorts)\n");
+        List<Map.Entry<String, Long>> top = new ArrayList<>(weekApps.entrySet());
+        Collections.sort(top, (a, b) -> Long.compare(b.getValue(), a.getValue()));
+        sb.append("Meiste Zeit in der Woche: ");
+        for (int i = 0; i < Math.min(10, top.size()); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(labels.get(top.get(i).getKey())).append(" ").append(dur(top.get(i).getValue()));
+        }
+        sb.append("\n");
+
+        // Tage im Detail
+        for (int off = -6; off <= 0; off++) {
+            long ds = UsageArchive.dayStart(off), de = UsageArchive.dayStart(off + 1);
+            sb.append("\n\n######## ").append(dateFmt.format(ds).toUpperCase(Locale.GERMANY)).append(" ########\n");
+
+            List<UsageReader.AppSession> apps = UsageArchive.get(this).read(ds, de);
+            Map<String, Long> totals = new HashMap<>();
+            for (UsageReader.AppSession a : apps) {
+                totals.merge(a.pkg, a.duration(), Long::sum);
+                labels.put(a.pkg, a.label);
+            }
+            List<Map.Entry<String, Long>> list = new ArrayList<>(totals.entrySet());
+            Collections.sort(list, (a, b) -> Long.compare(b.getValue(), a.getValue()));
+            sb.append("Apps: ");
+            if (list.isEmpty()) sb.append("keine Daten");
+            for (int i = 0; i < Math.min(8, list.size()); i++) {
+                if (i > 0) sb.append(", ");
+                sb.append(labels.get(list.get(i).getKey())).append(" ").append(dur(list.get(i).getValue()));
+            }
+            sb.append("\n");
+
+            sb.append("\n-- Shorts --\n");
+            List<ShortsDb.Session> shorts = ShortsDb.get(this).between(ds, de);
+            if (shorts.isEmpty()) sb.append("keine\n");
+            for (ShortsDb.Session s : shorts) {
+                sb.append(timeFmt.format(s.start)).append("–").append(timeFmt.format(s.end)).append("  ")
+                        .append(dur(s.end - s.start)).append(", ").append(s.swipes).append(" Shorts\n");
+            }
+
+            sb.append("\n-- Zeitleiste --\n");
+            int n = 0;
+            for (UsageReader.AppSession a : apps) {
+                if (a.duration() < 60_000) continue;
+                n++;
+                sb.append(timeFmt.format(a.start)).append("–").append(timeFmt.format(a.end)).append("  ")
+                        .append(a.label).append(" (").append(dur(a.duration())).append(")\n");
+            }
+            if (n == 0) sb.append(apps.isEmpty() ? "keine Daten\n" : "nur kurze App-Besuche unter 1 Minute\n");
+
+            sb.append("\n-- Inhalte --\n");
+            List<ContentDb.Entry> entries = ContentDb.get(this).between(ds, de);
+            if (entries.isEmpty()) sb.append("keine\n");
+            for (ContentDb.Entry e : entries) {
+                sb.append(timeFmt.format(e.ts)).append(" [").append(appName(e.pkg)).append(" · ").append(e.kind).append("] ")
+                        .append(e.text).append("\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    private void sendAsFile(String body) {
+        try {
+            String name = "Handy-Protokoll_7-Tage_" + new SimpleDateFormat("yyyy-MM-dd", Locale.GERMANY).format(System.currentTimeMillis()) + ".txt";
+            java.io.File dir = ShareProvider.dir(this);
+            java.io.File[] old = dir.listFiles();
+            if (old != null) for (java.io.File f : old) f.delete();
+            java.io.File f = new java.io.File(dir, name);
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(f)) {
+                out.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            Intent send = new Intent(Intent.ACTION_SEND);
+            send.setType("text/plain");
+            send.putExtra(Intent.EXTRA_STREAM, ShareProvider.uriFor(f));
+            send.putExtra(Intent.EXTRA_SUBJECT, "Handy-Protokoll der letzten 7 Tage");
+            send.putExtra(Intent.EXTRA_TEXT, "Im Anhang mein Handy-Protokoll der letzten 7 Tage. Bitte fass die Woche zusammen: "
+                    + "Welche Themen haben mich beschäftigt? Wie viel war echtes Lernen bzw. sinnvolle Arbeit, wie viel Ablenkung – "
+                    + "pro Tag und insgesamt? Was habe ich gegoogelt und worüber habe ich mich informiert? "
+                    + "Wann und wie viel habe ich Shorts geschaut, gibt es Muster (Uhrzeiten, Tage)? "
+                    + "Was fällt dir im Vergleich der Tage auf?");
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            send.setClipData(android.content.ClipData.newRawUri(name, ShareProvider.uriFor(f)));
+            startActivity(Intent.createChooser(send, "7 Tage teilen"));
+        } catch (Exception e) {
+            android.widget.Toast.makeText(this, "Teilen fehlgeschlagen: " + e.getMessage(), android.widget.Toast.LENGTH_LONG).show();
+        }
     }
 
     private void shareDay(List<UsageReader.AppSession> apps, List<ShortsDb.Session> shorts, long dayStart, long dayEnd) {

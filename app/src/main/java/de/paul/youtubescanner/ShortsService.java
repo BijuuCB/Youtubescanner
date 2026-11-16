@@ -32,6 +32,9 @@ public class ShortsService extends AccessibilityService {
 
     static final String YT = "com.google.android.youtube";
 
+    /** true, solange Android den Dienst wirklich angebunden hat. */
+    static volatile boolean running = false;
+
     /** Der vertikale Shorts-Feed. Nur diese IDs gelten als "Shorts offen". */
     private static final String[] SHORTS_IDS = {
             "reel_recycler",
@@ -69,6 +72,9 @@ public class ShortsService extends AccessibilityService {
         prefs = getSharedPreferences("pending", MODE_PRIVATE);
         recoverPendingSession();
         content = new ContentWatcher(this);
+        running = true;
+        WatchdogJob.cancelWarning(this);
+        WatchdogJob.schedule(this);
         try {
             ContentDb.get(this).purgeOld();
         } catch (Exception ignored) {
@@ -365,7 +371,14 @@ public class ShortsService extends AccessibilityService {
     }
 
     @Override
+    public boolean onUnbind(Intent intent) {
+        running = false;
+        return super.onUnbind(intent);
+    }
+
+    @Override
     public void onDestroy() {
+        running = false;
         endSession(System.currentTimeMillis());
         if (content != null) content.commitAll(null);
         if (screenOffReceiver != null) {
